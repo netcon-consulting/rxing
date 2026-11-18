@@ -182,11 +182,49 @@ impl MultipleBarcodeReader for QrReader {
 }
 
 impl QrReader {
-    fn decode_set_number_with_hints<B: crate::Binarizer>(
+    /// `Reader::decode_with_hints`, with an observer for each symbol the scan
+    /// reports.
+    ///
+    /// The observer is called with the binarized matrix the symbol was sampled
+    /// from and the result points, immediately before the symbol is pushed to
+    /// the results, so the observer sees exactly the bits `Decode` read its
+    /// corrected codewords from and nothing else: one call per reported symbol,
+    /// in result order. It is an observation, not a filter — what it returns is
+    /// discarded and it cannot change what the scan reports.
+    ///
+    /// This exists because the `Reader`/`MultipleBarcodeReader` entry points
+    /// return the decode results and keep the sampled matrix to themselves. A
+    /// consumer that has to look at the same bits the decoder looked at — to
+    /// re-read the corrected codewords, or to check what the sampled region
+    /// actually contains — cannot do it through those traits, and today has to
+    /// copy this loop to get the pairing.
+    pub fn decode_with_hints_observed<B: crate::Binarizer>(
+        &self,
+        image: &mut crate::BinaryBitmap<B>,
+        hints: &DecodeHints,
+        observer: &mut dyn FnMut(&crate::common::BitMatrix, &[crate::Point]),
+    ) -> crate::common::Result<RXingResult> {
+        self.internal_decode_with_hints_observed(image, hints, observer)
+    }
+
+    /// `MultipleBarcodeReader::decode_multiple_with_hints`, capped at `count`
+    /// symbols, with the same observer as [`Self::decode_with_hints_observed`].
+    pub fn decode_multiple_with_hints_observed<B: crate::Binarizer>(
         &self,
         image: &mut crate::BinaryBitmap<B>,
         hints: &DecodeHints,
         count: u32,
+        observer: &mut dyn FnMut(&crate::common::BitMatrix, &[crate::Point]),
+    ) -> crate::common::Result<Vec<RXingResult>> {
+        self.decode_set_number_with_hints_observed(image, hints, count, observer)
+    }
+
+    fn decode_set_number_with_hints_observed<B: crate::Binarizer>(
+        &self,
+        image: &mut crate::BinaryBitmap<B>,
+        hints: &DecodeHints,
+        count: u32,
+        observer: &mut dyn FnMut(&crate::common::BitMatrix, &[crate::Point]),
     ) -> crate::common::Result<Vec<RXingResult>> {
         let binImg = image.get_black_matrix(); //image.getBitMatrix();
         let maxSymbols = count;
@@ -246,6 +284,9 @@ impl QrReader {
                         }
 
                         if decoderResult.isValid() {
+                            // Observe the bits the decoder just read its corrected
+                            // codewords from, one call per reported symbol.
+                            observer(detectorResult.getBits(), position);
                             results.push(RXingResult::with_decoder_result(
                                 decoderResult,
                                 position,
@@ -276,6 +317,7 @@ impl QrReader {
                     let position = detectorResult.getPoints();
                     if let Ok(decoderResult) = decoderResult {
                         if decoderResult.isValid() {
+                            observer(detectorResult.getBits(), position);
                             results.push(RXingResult::with_decoder_result(
                                 decoderResult,
                                 position,
@@ -305,6 +347,7 @@ impl QrReader {
                     let position = detectorResult.getPoints();
                     if let Ok(decoderResult) = decoderResult {
                         if decoderResult.isValid() {
+                            observer(detectorResult.getBits(), position);
                             results.push(RXingResult::with_decoder_result(
                                 decoderResult,
                                 position,
@@ -323,10 +366,28 @@ impl QrReader {
         Ok(results)
     }
 
+    fn decode_set_number_with_hints<B: crate::Binarizer>(
+        &self,
+        image: &mut crate::BinaryBitmap<B>,
+        hints: &DecodeHints,
+        count: u32,
+    ) -> crate::common::Result<Vec<RXingResult>> {
+        self.decode_set_number_with_hints_observed(image, hints, count, &mut |_, _| {})
+    }
+
     fn internal_decode_with_hints<B: crate::Binarizer>(
         &self,
         image: &mut crate::BinaryBitmap<B>,
         hints: &DecodeHints,
+    ) -> crate::common::Result<RXingResult> {
+        self.internal_decode_with_hints_observed(image, hints, &mut |_, _| {})
+    }
+
+    fn internal_decode_with_hints_observed<B: crate::Binarizer>(
+        &self,
+        image: &mut crate::BinaryBitmap<B>,
+        hints: &DecodeHints,
+        observer: &mut dyn FnMut(&crate::common::BitMatrix, &[crate::Point]),
     ) -> crate::common::Result<RXingResult> {
         // #if 1
         if !matches!(hints.PureBarcode, Some(true))
@@ -334,7 +395,7 @@ impl QrReader {
         // if (!_hints.isPure())
         {
             return Ok(self
-                .decode_set_number_with_hints(image, hints, 1)?
+                .decode_set_number_with_hints_observed(image, hints, 1, observer)?
                 .first()
                 .ok_or(Exceptions::NOT_FOUND)?
                 .clone());
@@ -386,6 +447,7 @@ impl QrReader {
             Decode(detectorResult.getBits())?.withCharacterSetHint(hints.CharacterSet.clone());
         let position = detectorResult.getPoints();
 
+        observer(detectorResult.getBits(), position);
         Ok(RXingResult::with_decoder_result(
             decoderResult,
             position,
